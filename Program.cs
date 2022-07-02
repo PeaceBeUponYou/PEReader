@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Text;
 
 namespace PEReader
 {
@@ -15,12 +16,25 @@ namespace PEReader
         public int PointerToLineNumbers;
         public short NumberOfRelocations;
         public short NumberOfLineNumbers;
-        public int Characteristics;
+        public int Characteristics; //isExecutible = Characteristics & 0x20
     }
     public struct Exports
     {
         public char[] Name;
         public long offset;
+    }
+    public struct Imports
+    {
+        public char[] dllName;
+        public List<Exports> functions; //name,offset
+        int functionCount;
+        public long dataOffset;
+        public long thunk;
+        public int timeStamp;
+        public int forwarder;
+        public long NameRVA;
+        public long FirstThunk;
+
     }
     internal class PEExplorer
     {
@@ -32,6 +46,7 @@ namespace PEReader
         FileStream fs;
         List<SectionData> sections = new List<SectionData>();
         public List<Exports> exports = new List<Exports>();
+        public List<Imports> imports = new List<Imports>();
         Dictionary<string, long> Positions = new Dictionary<string, long>();
         byte[] fileTypeMZ = new byte[2];
         byte[] fileTypePE = new byte[4];
@@ -254,7 +269,7 @@ namespace PEReader
             }
             fs.Position = oldPos;
         }
-        public void Expots()
+        public void EnumExpots()
         {
             exports.Clear();
             long? exportTablePosition = GetVirtualAddress(BitConverter.ToInt32(ExportTable, 0));
@@ -292,6 +307,61 @@ namespace PEReader
                 }
                 fs.Position = oldPos;
             }
+        }
+        public void EnumImports()
+        {
+            imports.Clear();
+            long? importTablePosition = GetVirtualAddress(BitConverter.ToInt32(ImportTable, 0));
+            if (importTablePosition.HasValue)
+            {
+                long oldPos = fs.Position;
+                long importTracker = importTablePosition.Value;
+                bool tarIf64 = isFile64Bit();
+                int jump = (tarIf64) ? 8 : 4;
+                while (true)
+                {
+                    fs.Position = importTracker;
+                    Imports import = new Imports();
+                    import.thunk = BitConverter.ToInt32(ReadByteArrayMaker(0, 4));
+                    if (import.thunk == 0)
+                        break;
+                    import.timeStamp = BitConverter.ToInt32(ReadByteArrayMaker(0, 4));
+                    import.forwarder = BitConverter.ToInt32(ReadByteArrayMaker(0, 4));
+                    import.NameRVA = BitConverter.ToInt32(ReadByteArrayMaker(0, 4));
+                    import.FirstThunk = BitConverter.ToInt32(ReadByteArrayMaker(0, 4));
+                    importTracker = fs.Position;
+                    import.dllName = ReadStringOfChars((long)GetVirtualAddress((int)import.NameRVA));
+                    int offsetForImportFunctions = (int)GetVirtualAddress((int)import.FirstThunk);
+                    int count = 0;
+                    import.functions = new List<Exports>();
+                    while (true)
+                    {
+                        Exports exports = new Exports();
+                        fs.Position = offsetForImportFunctions + count * jump;
+                        exports.offset = fs.Position;
+                        count++;
+                        int currentOff = BitConverter.ToInt32(ReadByteArrayMaker(0, 4), 0);
+                        if (currentOff == 0)
+                            break;
+                        else if (!tarIf64 || BitConverter.ToUInt32(ReadByteArrayMaker(0, 4), 0) != 0x80000000)
+                        {
+                            int offPos = (int)GetVirtualAddress(currentOff);
+                            exports.Name = (offPos > 0 && currentOff > 0) ? ReadStringOfChars(offPos + 2) : new char[1];
+                        }
+                        else //Ordinal
+                        {
+                            exports.Name = new char[2];
+                            exports.Name[0] = '-';
+                            exports.Name[1] = '\0';
+                        }
+                        import.functions.Add(exports);
+
+                    }
+                    imports.Add(import);
+                }
+                fs.Position = oldPos;
+            }
+
         }
         private char[] ReadStringOfChars(long position, int count = -1,bool shouldReset = false)
         {
@@ -386,10 +456,21 @@ namespace PEReader
             PEExplorer pe = new PEExplorer(pathToFile);
             pe.Initialize();
             pe.EnumSections();
-            pe.Expots();
+            /*pe.EnumExpots();
             foreach(Exports export in pe.exports)
             {
                 Console.WriteLine($"{export.offset:X8} - {new string(export.Name)}");
+            }*/
+            pe.EnumImports();
+            foreach (Imports import in pe.imports)
+            {
+                StringBuilder allFunction = new StringBuilder();
+                allFunction.Append('\n');
+                foreach (Exports exp in import.functions)
+                {
+                    allFunction.Append('\t' + exp.offset.ToString("X8") + " - " + new string(exp.Name) + '\n');
+                }
+                Console.WriteLine($"{new string(import.dllName)}: {allFunction.ToString()}");
             }
         }
     }
